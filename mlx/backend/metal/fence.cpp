@@ -27,13 +27,13 @@ struct FenceImpl {
 
   ~FenceImpl() {
     if (!use_fast) {
-      // Wraps Metal SharedEvent
       auto p = metal::new_scoped_memory_pool();
       static_cast<MTL::SharedEvent*>(fence)->release();
     } else {
       allocator::free(allocator::Buffer{static_cast<MTL::Buffer*>(fence)});
     }
   }
+
   bool use_fast{false};
   uint32_t count{0};
   void* fence;
@@ -62,7 +62,7 @@ void Fence::wait(Stream stream, const array& x) {
         }
         return;
       }
-      while (f.cpu_value()[0] < count) {
+      while (f.cpu_value()[0].load() < count) {
       }
     });
     return;
@@ -76,6 +76,16 @@ void Fence::wait(Stream stream, const array& x) {
     auto command_buffer = d.get_command_buffer(idx);
     command_buffer->encodeWait(static_cast<MTL::Event*>(f.fence), f.count);
     command_buffer->addCompletedHandler(
+        [fence_ = fence_](MTL::CommandBuffer* cbuf) {});
+    return;
+  }
+
+  // Check from CPU if fence is already satisfied (e.g. CPU update
+  // completed before we got here). Avoids dispatching spinning kernel.
+  if (f.cpu_value()[0].load() >= f.count) {
+    auto& compute_encoder = d.get_command_encoder(idx);
+    compute_encoder.register_output_array(x);
+    d.get_command_buffer(idx)->addCompletedHandler(
         [fence_ = fence_](MTL::CommandBuffer* cbuf) {});
     return;
   }

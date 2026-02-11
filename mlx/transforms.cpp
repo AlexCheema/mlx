@@ -239,23 +239,9 @@ array eval_impl(std::vector<array> outputs, bool async) {
       cpu::eval(arr);
     }
 
-    if (scheduler::n_active_tasks() > MAX_ACTIVE_TASKS ||
-        (get_active_memory() > get_memory_limit() &&
-         scheduler::n_active_tasks() > 0)) {
-      // Commit any open streams
-      for (auto i : open_streams) {
-        auto s = get_stream(i);
-        if (s.device == Device::gpu) {
-          gpu::finalize(s);
-        }
-      }
-      scheduler::wait_for_one();
-      while (get_active_memory() > get_memory_limit() &&
-             scheduler::n_active_tasks() > 0) {
-        scheduler::wait_for_one();
-      }
-    }
-
+    // Encode fence updates right after eval so they land in the same
+    // command buffer as the producer's work (before any auto-commit
+    // or finalize can split them into a separate buffer).
     auto maybe_update_fence = [&fences, &needs_fence, stream](const array& a) {
       if (auto nf = needs_fence.find(a.id()); nf != needs_fence.end()) {
         auto it = fences.find(stream.index);
@@ -267,12 +253,40 @@ array eval_impl(std::vector<array> outputs, bool async) {
     };
 
     arr.set_status(array::Status::evaluated);
-    // TODO Maybe always want the fence coherent kernel in the same cbuf
-    // as the other kernels?
     maybe_update_fence(arr);
     for (auto& sib : arr.siblings()) {
       sib.set_status(array::Status::evaluated);
       maybe_update_fence(sib);
+    }
+
+    if (scheduler::n_active_tasks() > MAX_ACTIVE_TASKS ||
+        (get_active_memory() > get_memory_limit() &&
+         scheduler::n_active_tasks() > 0)) {
+      // Commit any open streams
+      for (auto i : open_streams) {
+        auto s = get_stream(i);
+        if (s.device == Device::gpu) {
+          gpu::finalize(s);
+        }
+      }
+      if (!needs_fence.empty()) {
+        // A spinning fence_wait kernel may be blocking the GPU,
+        // preventing other tasks from completing. Use a timeout
+        // so the eval loop can continue and dispatch fence_update.
+        scheduler::wait_for_one(std::chrono::milliseconds(1));
+      } else {
+        scheduler::wait_for_one();
+      }
+      while (get_active_memory() > get_memory_limit() &&
+             scheduler::n_active_tasks() > 0) {
+        if (!needs_fence.empty()) {
+          if (!scheduler::wait_for_one(std::chrono::milliseconds(1))) {
+            break;
+          }
+        } else {
+          scheduler::wait_for_one();
+        }
+      }
     }
     if (!arr.is_tracer()) {
       arr.detach();

@@ -134,6 +134,18 @@ class Scheduler {
     }
   }
 
+  // Returns true if a task completed, false on timeout.
+  bool wait_for_one(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lk(mtx);
+    int n_tasks_old = n_active_tasks();
+    if (n_tasks_old > 1) {
+      return completion_cv.wait_for(lk, timeout, [this, n_tasks_old] {
+        return this->n_active_tasks() < n_tasks_old;
+      });
+    }
+    return true;
+  }
+
   ~Scheduler() {
     for (auto s : streams_) {
       try {
@@ -184,6 +196,10 @@ inline void notify_task_completion(const Stream& stream) {
 
 inline void wait_for_one() {
   scheduler().wait_for_one();
+}
+
+inline bool wait_for_one(std::chrono::milliseconds timeout) {
+  return scheduler().wait_for_one(timeout);
 }
 
 } // namespace mlx::core::scheduler

@@ -25,6 +25,8 @@ constexpr constant metal::thread_scope thread_scope_system =
       metal::thread_scope_system);
 }
 
+constexpr constant uint FENCE_WAIT_MAX_ITERS = 100000000u;
+
 // single thread kernel to update timestamp
 [[kernel]] void fence_update(
     volatile coherent(system) device uint* timestamp [[buffer(0)]],
@@ -40,7 +42,7 @@ constexpr constant metal::thread_scope thread_scope_system =
 [[kernel]] void fence_wait(
     volatile coherent(system) device uint* timestamp [[buffer(0)]],
     constant uint& value [[buffer(1)]]) {
-  while (1) {
+  for (uint i = 0; i < FENCE_WAIT_MAX_ITERS; ++i) {
     metal::atomic_thread_fence(
         metal::mem_flags::mem_device,
         metal::memory_order_seq_cst,
