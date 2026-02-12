@@ -17,6 +17,8 @@ MeshGroup::MeshGroup(
       size_(device_names.size()),
       side_channel_(rank_, size_, coordinator_addr),
       connections_(create_connections(device_names)) {
+  std::cerr << IBV_TAG << " Creating MeshGroup (rank=" << rank_
+            << ", size=" << size_ << ")" << std::endl;
   if (size_ > MAX_PEERS) {
     std::ostringstream msg;
     msg << "[jaccl] The JACCL mesh supports up to " << MAX_PEERS
@@ -28,20 +30,28 @@ MeshGroup::MeshGroup(
   initialize();
 
   // Make sure every node has reached here before continuing
+  std::cerr << IBV_TAG << " Waiting for barrier" << std::endl;
   side_channel_.all_gather<int>(0);
+  std::cerr << IBV_TAG << " MeshGroup ready" << std::endl;
 }
 
 void MeshGroup::initialize() {
+  std::cerr << IBV_TAG << " MeshGroup::initialize() rank=" << rank_
+            << " size=" << size_ << std::endl;
+
   // Create the queue pairs
-  for (auto& conn : connections_) {
-    if (conn.ctx == nullptr) {
+  for (int i = 0; i < size_; i++) {
+    if (connections_[i].ctx == nullptr) {
       continue;
     }
-    conn.allocate_protection_domain();
-    conn.create_completion_queue(MAX_SEND_WR + MAX_RECV_WR);
-    conn.create_queue_pair();
+    std::cerr << IBV_TAG << " Initializing connection to peer " << i
+              << std::endl;
+    connections_[i].allocate_protection_domain();
+    connections_[i].create_completion_queue(MAX_SEND_WR + MAX_RECV_WR);
+    connections_[i].create_queue_pair();
   }
 
+  std::cerr << IBV_TAG << " Allocating buffers" << std::endl;
   allocate_buffers();
 
   // First init all connections
@@ -55,11 +65,15 @@ void MeshGroup::initialize() {
   // Gather the information to be exchanged, this also serves as a barrier so
   // that all peers have initialized their connections before attempting to
   // transition to RTS.
+  std::cerr << IBV_TAG << " Gathering destination info via side channel"
+            << std::endl;
   std::vector<Destination> info;
   for (auto& conn : connections_) {
     info.emplace_back(conn.info());
   }
   auto all_infos = side_channel_.all_gather(info);
+  std::cerr << IBV_TAG << " Side channel all_gather complete, received info "
+            << "from " << all_infos.size() << " rank(s)" << std::endl;
 
   // Transition queue pairs to RTS
   for (int peer = 0; peer < size_; peer++) {
@@ -67,9 +81,13 @@ void MeshGroup::initialize() {
       continue;
     }
     auto peer_info = all_infos[peer][rank_];
+    std::cerr << IBV_TAG << " Connecting to peer " << peer
+              << " (remote qp_num=" << peer_info.queue_pair_number
+              << " lid=" << peer_info.local_id << ")" << std::endl;
     connections_[peer].queue_pair_rtr(peer_info);
     connections_[peer].queue_pair_rts();
   }
+  std::cerr << IBV_TAG << " MeshGroup::initialize() complete" << std::endl;
 }
 
 void MeshGroup::allocate_buffers() {

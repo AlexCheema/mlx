@@ -36,8 +36,11 @@ namespace mlx::core::distributed::jaccl {
 IBVWrapper::IBVWrapper() {
   librdma_handle_ = dlopen("librdma.dylib", RTLD_NOW | RTLD_GLOBAL);
   if (librdma_handle_ == nullptr) {
+    std::cerr << IBV_TAG << " librdma.dylib not found, RDMA unavailable"
+              << std::endl;
     return;
   }
+  std::cerr << IBV_TAG << " librdma.dylib loaded successfully" << std::endl;
 
   LOAD_SYMBOL(ibv_get_device_list, get_device_list);
   LOAD_SYMBOL(ibv_get_device_name, get_device_name);
@@ -143,6 +146,7 @@ void Connection::allocate_protection_domain() {
   if (protection_domain == nullptr) {
     throw std::runtime_error("[jaccl] Couldn't allocate protection domain");
   }
+  std::cerr << IBV_TAG << " Allocated protection domain" << std::endl;
 }
 
 void Connection::create_completion_queue(int num_entries) {
@@ -150,6 +154,8 @@ void Connection::create_completion_queue(int num_entries) {
   if (completion_queue == nullptr) {
     throw std::runtime_error("[jaccl] Couldn't create completion queue");
   }
+  std::cerr << IBV_TAG << " Created completion queue (entries=" << num_entries
+            << ")" << std::endl;
 }
 
 void Connection::create_queue_pair() {
@@ -172,6 +178,8 @@ void Connection::create_queue_pair() {
   if (queue_pair == nullptr) {
     throw std::runtime_error("[jaccl] Couldn't create queue pair");
   }
+  std::cerr << IBV_TAG << " Created queue pair (qp_num=" << queue_pair->qp_num
+            << ")" << std::endl;
 }
 
 const Destination& Connection::info() {
@@ -189,10 +197,20 @@ const Destination& Connection::info() {
   src.packet_sequence_number = 7; // TODO: Change to sth random
   src.global_identifier = gid;
 
+  std::cerr << IBV_TAG << " Local destination: lid=" << src.local_id
+            << " qp_num=" << src.queue_pair_number
+            << " psn=" << src.packet_sequence_number
+            << " gid=" << std::hex
+            << src.global_identifier.global.subnet_prefix << ":"
+            << src.global_identifier.global.interface_id
+            << std::dec << std::endl;
+
   return src;
 }
 
 void Connection::queue_pair_init() {
+  std::cerr << IBV_TAG << " QP " << queue_pair->qp_num
+            << " transitioning to INIT" << std::endl;
   ibv_qp_attr attr = {};
   attr.qp_state = IBV_QPS_INIT;
   attr.port_num = 1;
@@ -205,12 +223,17 @@ void Connection::queue_pair_init() {
 
   if (int status = ibv().modify_qp(queue_pair, &attr, mask); status != 0) {
     std::ostringstream msg;
-    msg << "[jaccl] Changing queue pair to INIT failed with errno " << status;
+    msg << "[jaccl] Changing queue pair " << queue_pair->qp_num
+        << " to INIT failed with errno " << status;
     throw std::invalid_argument(msg.str());
   }
 }
 
 void Connection::queue_pair_rtr(const Destination& dst) {
+  std::cerr << IBV_TAG << " QP " << queue_pair->qp_num
+            << " transitioning to RTR (remote: lid=" << dst.local_id
+            << " qp_num=" << dst.queue_pair_number
+            << " psn=" << dst.packet_sequence_number << ")" << std::endl;
   ibv_qp_attr attr = {};
   memset(&attr, 0, sizeof(attr));
   attr.qp_state = IBV_QPS_RTR;
@@ -241,6 +264,9 @@ void Connection::queue_pair_rtr(const Destination& dst) {
 }
 
 void Connection::queue_pair_rts() {
+  std::cerr << IBV_TAG << " QP " << queue_pair->qp_num
+            << " transitioning to RTS (psn=" << src.packet_sequence_number
+            << ")" << std::endl;
   ibv_qp_attr attr = {};
   attr.qp_state = IBV_QPS_RTS;
   attr.sq_psn = src.packet_sequence_number;
@@ -249,9 +275,12 @@ void Connection::queue_pair_rts() {
 
   if (int status = ibv().modify_qp(queue_pair, &attr, mask); status != 0) {
     std::ostringstream msg;
-    msg << "[jaccl] Changing queue pair to RTS failed with errno " << status;
+    msg << "[jaccl] Changing queue pair " << queue_pair->qp_num
+        << " to RTS failed with errno " << status;
     throw std::invalid_argument(msg.str());
   }
+  std::cerr << IBV_TAG << " QP " << queue_pair->qp_num << " now in RTS state"
+            << std::endl;
 }
 
 std::vector<Connection> create_connections(
@@ -259,14 +288,25 @@ std::vector<Connection> create_connections(
   std::vector<Connection> connections;
   int num_devices = 0;
   ibv_device** devices = ibv().get_device_list(&num_devices);
-  for (auto& name : device_names) {
+  std::cerr << IBV_TAG << " Found " << num_devices << " RDMA device(s)"
+            << std::endl;
+  for (int i = 0; i < num_devices; i++) {
+    std::cerr << IBV_TAG << "   device[" << i
+              << "]=" << ibv().get_device_name(devices[i]) << std::endl;
+  }
+
+  for (size_t idx = 0; idx < device_names.size(); idx++) {
+    auto& name = device_names[idx];
     // Empty so add a nullptr context
     if (name.empty()) {
+      std::cerr << IBV_TAG << " Connection[" << idx << "]: skipped (self)"
+                << std::endl;
       connections.emplace_back(nullptr);
       continue;
     }
 
     // Search for the name and try to open the device
+    bool found = false;
     for (int i = 0; i < num_devices; i++) {
       if (name == ibv().get_device_name(devices[i])) {
         auto ctx = ibv().open_device(devices[i]);
@@ -275,18 +315,48 @@ std::vector<Connection> create_connections(
           msg << "[jaccl] Could not open device " << name;
           throw std::runtime_error(msg.str());
         }
+        std::cerr << IBV_TAG << " Connection[" << idx << "]: opened device "
+                  << name << std::endl;
         connections.emplace_back(ctx);
+        found = true;
         break;
       }
+    }
+    if (!found) {
+      std::ostringstream msg;
+      msg << "[jaccl] Device " << name << " not found in device list";
+      throw std::runtime_error(msg.str());
     }
   }
   ibv().free_device_list(devices);
 
+  std::cerr << IBV_TAG << " Created " << connections.size() << " connection(s)"
+            << std::endl;
   return connections;
 }
 
 SideChannel::SideChannel(int rank, int size, const char* addr)
-    : rank_(rank), size_(size) {
+    : rank_(rank), size_(size), use_pipes_(false), fd_in_(-1), fd_out_(-1) {
+  const char* pipe_in_str = std::getenv("MLX_JACCL_PIPE_IN");
+  const char* pipe_out_str = std::getenv("MLX_JACCL_PIPE_OUT");
+
+  if (pipe_in_str && pipe_out_str) {
+    // Pipe mode: communicate with local relay process via anonymous pipes
+    use_pipes_ = true;
+    fd_in_ = std::atoi(pipe_in_str);
+    fd_out_ = std::atoi(pipe_out_str);
+    std::cerr << IBV_TAG << " Using pipe-based side channel"
+              << " (rank=" << rank_ << ", size=" << size_
+              << ", fd_in=" << fd_in_ << ", fd_out=" << fd_out_ << ")"
+              << std::endl;
+    return;
+  }
+
+  // TCP mode: original coordinator-based implementation
+  std::cerr << IBV_TAG << " Using TCP side channel"
+            << " (rank=" << rank_ << ", size=" << size_
+            << ", coordinator=" << addr << ")" << std::endl;
+
   auto address = detail::parse_address(addr);
 
   if (rank_ == 0) {
@@ -321,9 +391,47 @@ SideChannel::SideChannel(int rank, int size, const char* addr)
 }
 
 SideChannel::SideChannel(SideChannel&& sc)
-    : rank_(sc.rank_), size_(sc.size_), sockets_(std::move(sc.sockets_)) {
+    : rank_(sc.rank_),
+      size_(sc.size_),
+      use_pipes_(sc.use_pipes_),
+      fd_in_(sc.fd_in_),
+      fd_out_(sc.fd_out_),
+      sockets_(std::move(sc.sockets_)) {
   sc.rank_ = -1;
   sc.size_ = -1;
+  sc.use_pipes_ = false;
+  sc.fd_in_ = -1;
+  sc.fd_out_ = -1;
+}
+
+void SideChannel::pipe_write(const void* data, size_t len) {
+  const char* ptr = static_cast<const char*>(data);
+  size_t written = 0;
+  while (written < len) {
+    ssize_t n = write(fd_out_, ptr + written, len - written);
+    if (n <= 0) {
+      std::ostringstream msg;
+      msg << IBV_TAG << " Pipe write failed (errno=" << errno
+          << ", written=" << written << "/" << len << ")";
+      throw std::runtime_error(msg.str());
+    }
+    written += n;
+  }
+}
+
+void SideChannel::pipe_read(void* data, size_t len) {
+  char* ptr = static_cast<char*>(data);
+  size_t total_read = 0;
+  while (total_read < len) {
+    ssize_t n = read(fd_in_, ptr + total_read, len - total_read);
+    if (n <= 0) {
+      std::ostringstream msg;
+      msg << IBV_TAG << " Pipe read failed (errno=" << errno
+          << ", read=" << total_read << "/" << len << ")";
+      throw std::runtime_error(msg.str());
+    }
+    total_read += n;
+  }
 }
 
 } // namespace mlx::core::distributed::jaccl

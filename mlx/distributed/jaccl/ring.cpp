@@ -18,6 +18,9 @@ RingGroup::RingGroup(
       side_channel_(rank_, size_, coordinator_addr),
       left_(create_connections(left_devices)),
       right_(create_connections(right_devices)) {
+  std::cerr << IBV_TAG << " Creating RingGroup (rank=" << rank_
+            << ", size=" << size_ << ", wires=" << left_.size() << ")"
+            << std::endl;
   if (left_.size() > MAX_CONNS || right_.size() > MAX_CONNS) {
     std::ostringstream msg;
     msg << "[jaccl] Up to " << MAX_CONNS << " per direction supported but "
@@ -29,7 +32,9 @@ RingGroup::RingGroup(
   initialize();
 
   // Make sure every node has reached here before continuing
+  std::cerr << IBV_TAG << " Waiting for barrier" << std::endl;
   side_channel_.all_gather<int>(0);
+  std::cerr << IBV_TAG << " RingGroup ready" << std::endl;
 }
 
 void RingGroup::initialize() {

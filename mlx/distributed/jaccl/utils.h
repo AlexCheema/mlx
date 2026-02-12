@@ -258,11 +258,16 @@ inline int poll(
 }
 
 /**
- * Implement a TCP side channel to exchange information about the RDMA
- * connections.
+ * Implement a side channel to exchange information about the RDMA connections.
  *
  * Implements a simple all gather where every node sends to rank 0 and rank 0
  * broadcasts to every node.
+ *
+ * Supports two modes:
+ *   - TCP mode (default): rank 0 acts as coordinator over TCP sockets.
+ *   - Pipe mode: each rank communicates with a local relay process over
+ *     anonymous pipes. Enabled when MLX_JACCL_PIPE_IN and MLX_JACCL_PIPE_OUT
+ *     environment variables are set to file descriptor numbers.
  */
 class SideChannel {
  public:
@@ -274,6 +279,74 @@ class SideChannel {
 
   template <typename T>
   std::vector<T> all_gather(const T& v) {
+    if (use_pipes_) {
+      return all_gather_pipe(v);
+    }
+    return all_gather_tcp(v);
+  }
+
+ private:
+  void pipe_write(const void* data, size_t len);
+  void pipe_read(void* data, size_t len);
+
+  /**
+   * Pipe-based all_gather. Each call writes local data to the out pipe and
+   * reads the gathered result from the in pipe.
+   *
+   * Protocol per round:
+   *   Write: [uint32_t data_size] [data_size bytes]
+   *   Read:  [uint32_t total_size] [total_size bytes = size_ * data_size]
+   */
+  template <typename T>
+  std::vector<T> all_gather_pipe(const T& v) {
+    std::vector<T> result(size_);
+
+    if constexpr (is_container<T>::value) {
+      using U = typename T::value_type;
+
+      // Exchange lengths first (recursive scalar all_gather)
+      auto lengths = all_gather_pipe<int>(v.size());
+      auto max_len = *std::max_element(lengths.begin(), lengths.end());
+
+      // Pad local data to max_len and write to pipe
+      std::vector<U> padded(max_len);
+      std::copy(v.begin(), v.end(), padded.begin());
+      uint32_t data_size = static_cast<uint32_t>(max_len * sizeof(U));
+      pipe_write(&data_size, sizeof(data_size));
+      pipe_write(padded.data(), data_size);
+
+      // Read gathered data from pipe
+      uint32_t total_size;
+      pipe_read(&total_size, sizeof(total_size));
+      for (int i = 0; i < size_; i++) {
+        result[i].resize(max_len);
+        pipe_read(result[i].data(), data_size);
+      }
+
+      // Resize back to original lengths
+      for (int i = 0; i < size_; i++) {
+        result[i].resize(lengths[i]);
+      }
+    } else {
+      // Scalar: write local value
+      uint32_t data_size = sizeof(T);
+      pipe_write(&data_size, sizeof(data_size));
+      pipe_write(&v, sizeof(T));
+
+      // Read gathered values
+      uint32_t total_size;
+      pipe_read(&total_size, sizeof(total_size));
+      pipe_read(result.data(), total_size);
+    }
+
+    return result;
+  }
+
+  /**
+   * TCP-based all_gather (original implementation).
+   */
+  template <typename T>
+  std::vector<T> all_gather_tcp(const T& v) {
     std::vector<T> result(size_);
 
     // T is a container of stuff like std::vector or std::string
@@ -282,7 +355,7 @@ class SideChannel {
 
       // Share the lengths first and set the communication size to be the
       // maximum length of the containers.
-      auto lengths = all_gather<int>(v.size());
+      auto lengths = all_gather_tcp<int>(v.size());
       auto max_len = *std::max_element(lengths.begin(), lengths.end());
       for (auto& s : result) {
         s.resize(max_len);
@@ -333,9 +406,11 @@ class SideChannel {
     return result;
   }
 
- private:
   int rank_;
   int size_;
+  bool use_pipes_;
+  int fd_in_;   // reads gathered data from relay process
+  int fd_out_;  // writes local data to relay process
   std::vector<detail::TCPSocket> sockets_;
 };
 

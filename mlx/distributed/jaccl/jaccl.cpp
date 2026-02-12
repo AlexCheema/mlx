@@ -132,16 +132,24 @@ std::shared_ptr<GroupImpl> init(bool strict /* = false */) {
   const char* coordinator = std::getenv("MLX_JACCL_COORDINATOR");
   const char* rank_str = std::getenv("MLX_RANK");
   const char* ring = std::getenv("MLX_JACCL_RING");
+  const char* pipe_in = std::getenv("MLX_JACCL_PIPE_IN");
+  const char* pipe_out = std::getenv("MLX_JACCL_PIPE_OUT");
 
-  if (!is_available() || !dev_file || !coordinator || !rank_str) {
+  // Coordinator is optional when pipe mode is active
+  bool has_pipes = pipe_in && pipe_out;
+  bool has_coordinator = coordinator != nullptr;
+
+  if (!is_available() || !dev_file || !rank_str ||
+      (!has_coordinator && !has_pipes)) {
     if (strict) {
       std::ostringstream msg;
       msg << "[jaccl] You need to provide via environment variables a rank (MLX_RANK), "
-          << "a device file (MLX_IBV_DEVICES) and a coordinator ip/port (MLX_JACCL_COORDINATOR) "
+          << "a device file (MLX_IBV_DEVICES) and either a coordinator ip/port "
+          << "(MLX_JACCL_COORDINATOR) or pipe fds (MLX_JACCL_PIPE_IN, MLX_JACCL_PIPE_OUT) "
           << "but provided MLX_RANK=\"" << ((rank_str) ? rank_str : "")
           << "\", MLX_IBV_DEVICES=\"" << ((dev_file) ? dev_file : "")
           << "\" and MLX_JACCL_COORDINATOR=\""
-          << ((coordinator) ? coordinator : "");
+          << ((coordinator) ? coordinator : "") << "\"";
       throw std::runtime_error(msg.str());
     }
     return nullptr;
@@ -158,17 +166,21 @@ std::shared_ptr<GroupImpl> init(bool strict /* = false */) {
     throw std::runtime_error(msg.str());
   }
 
+  // When using pipe mode, coordinator may be null. Pass a dummy address
+  // since the SideChannel constructor will use pipes instead of TCP.
+  const char* coord_addr = coordinator ? coordinator : "0.0.0.0:0";
+
   if (prefer_ring && devices.is_valid_ring()) {
     auto [left, right] = devices.extract_ring_connectivity(rank);
     return std::make_shared<RingGroup>(
-        rank, devices.size(), left, right, coordinator);
+        rank, devices.size(), left, right, coord_addr);
   } else if (devices.is_valid_mesh()) {
     auto device_names = devices.extract_mesh_connectivity(rank);
-    return std::make_shared<MeshGroup>(rank, device_names, coordinator);
+    return std::make_shared<MeshGroup>(rank, device_names, coord_addr);
   } else if (devices.is_valid_ring()) {
     auto [left, right] = devices.extract_ring_connectivity(rank);
     return std::make_shared<RingGroup>(
-        rank, devices.size(), left, right, coordinator);
+        rank, devices.size(), left, right, coord_addr);
   } else {
     throw std::runtime_error(
         "[jaccl] The device file should define a valid mesh or a valid ring.");
