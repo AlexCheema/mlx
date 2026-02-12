@@ -1,6 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
 #include "mlx/distributed/jaccl/mesh.h"
+#include <iostream>
 #include "mlx/backend/cpu/encoder.h"
 #include "mlx/distributed/reduction_ops.h"
 #include "mlx/dtype_utils.h"
